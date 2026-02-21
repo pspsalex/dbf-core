@@ -2,7 +2,7 @@
  * sql.c
  *****************************************************************************
  * conversion of dbf files to sql
- * 
+ *
  * Author: 	Dr Georg Roesler, groesle@gwdg.de
  * 			Mikhail Teterin,
  *			Björn Berg, clergyman@gmx.de
@@ -13,6 +13,8 @@
 
 #include "dbf.h"
 #include "sql.h"
+
+#define MIN(A, B) (((A) < (B)) ? (A) : (B))
 
 /* Whether to trim SQL strings from either side: */
 static int trimright = 0;
@@ -121,7 +123,7 @@ int writeSQLHeader (FILE *fp, P_DBF *p_dbf,
 
 	if ( sql_drop_table ) {
 		fprintf(fp, "\nDROP TABLE %s;\n", tablename);
-	}   
+	}
 	if ( sql_create_table ) {
 		int unsigned l1,l2;
 		int i, columns;
@@ -155,8 +157,9 @@ int writeSQLHeader (FILE *fp, P_DBF *p_dbf,
 					 * supported by dbf.
 					 * - berg, 2003-09-08
 					 */
-					fprintf(stderr, _("Invalid mode. Cannot convert this dBASE file. Memo fields are not supported."));
-					return 1;
+					fprintf(fp, "text");//, field_length);
+					//fprintf(stderr, _("xInvalid mode. Cannot convert this dBASE file. Memo fields are not supported."));
+					//return 1;
 				break;
 				case 'I':
 					fputs("int", fp);
@@ -245,13 +248,14 @@ int writeSQLFooter (FILE *fp, P_DBF *p_dbf,
  * fills the SQL table
  */
 int
-writeSQLLine (FILE *fp, P_DBF *p_dbf, 
+writeSQLLine (FILE *fp, P_DBF *p_dbf,
     const unsigned char *value, int record_length,
     const char *filename, const char *export_filename)
 {
 	int i, columns;
 
 	columns = dbf_NumCols(p_dbf);
+
 
 	if(!usecopy)
 		fprintf(fp, "INSERT INTO %s VALUES (", tablename);
@@ -262,10 +266,12 @@ writeSQLLine (FILE *fp, P_DBF *p_dbf,
 		int isstring;
 		int isdate;
 		int isbool;
+		int ismemo;
 		field_type = dbf_ColumnType(p_dbf, i);
 		isstring = (field_type == 'M' || field_type == 'C');
 		isdate = (field_type == 'D');
 		isbool = (field_type == 'L');
+		ismemo = (field_type == 'M' );
 
 		/*
 		 * A string is only trimmed if trimright and/or trimleft is set
@@ -296,7 +302,7 @@ writeSQLLine (FILE *fp, P_DBF *p_dbf,
 		 * and actually don't need right-trimming, but if we right trim
 		 * them as well, we will determine NULL values easily.
 		 */
-		if (!isstring || (isstring && trimright)) {
+		if (!isstring || (isstring && (trimright||ismemo))) {
 			while (--end != begin && *end == ' ')
 				;
 			if (end == begin && *end == ' ') {
@@ -323,7 +329,7 @@ writeSQLLine (FILE *fp, P_DBF *p_dbf,
 			end++;
 		}
 
-		if (trimleft || !isstring) {
+		if (ismemo || trimleft || !isstring) {
 			while (begin != end && *begin == ' ')
 				begin++;
 		}
@@ -346,27 +352,48 @@ writeSQLLine (FILE *fp, P_DBF *p_dbf,
 
 			sprintf(fmt, "%%%d.%df", dbf_ColumnSize(p_dbf, i), dbf_ColumnDecimals(p_dbf, i));
 			fprintf(fp, fmt, *(double *)begin);
-			begin += dbf_ColumnSize(p_dbf, i);		
+			begin += dbf_ColumnSize(p_dbf, i);
 
 		} else {
+			char *memo;
+			int size = 0;
+			memo = begin;
 
-			do	{ /* Output the non-empty string:*/
+			if(ismemo)
+			{
+				char recNumStr[11];
+				memcpy(recNumStr, begin, MIN(10, end-begin));
+				recNumStr[MIN(10, end-begin)] = 0;
+				int recNum;
+				recNum = atoi(recNumStr);
+				if (!recNum) {
+					fprintf(stderr, "Cannot convert '%s' to a DBT record number\n", recNumStr);
+				}
+				size = dbf_ReadMemo(p_dbf, &memo, recNum);
+				if ( size > 0 ) {
+					begin = memo;
+					end = begin + size;
+				} else {
+					fprintf(stderr, "Got incorrect size or error: %d, DBT record %s\n", size, recNumStr);
+					begin = end + 1;
+				}
+			}
 
+			while (begin < end) { /* Output the non-empty string:*/
 				char sign = *begin++;	/* cast operations */
 				switch (sign) {
 					case '\'':
-						putc('\\', fp);
 						putc('\'', fp);
-						break;
-					case '\"':
-						putc('\\', fp);
-						putc('\"', fp);
+						putc('\'', fp);
 						break;
 					default:
 						putc(sign, fp);
 				}
-			} while (begin < end);
+			}
 
+			if (ismemo && (size > 0)) {
+				free(memo);
+			}
 		}
 
 		if (!usecopy && (isdate || isstring))
